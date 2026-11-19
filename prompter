@@ -19,12 +19,33 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "prompter"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "prompter" / "config.json"
+
+
+def load_config() -> dict:
+    """Optional ~/.config/prompter/config.json: {"stt": [urls], "stt_lang": "fr-FR", "stt_server": [argv]}."""
+    try:
+        return json.loads(CONFIG.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+
+
+def port_open(url: str) -> bool:
+    import socket
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    try:
+        with socket.create_connection((u.hostname, u.port or 80), timeout=0.5):
+            return True
+    except OSError:
+        return False
 BROWSERS = ["brave-browser-stable", "brave-browser", "brave", "chromium", "chromium-browser",
             "google-chrome-stable", "google-chrome", "microsoft-edge-stable", "microsoft-edge"]
 
@@ -32,9 +53,11 @@ T = {
     "en": {
         "help": "<b>Space</b> or click: play / pause &nbsp;·&nbsp; <b>↑ ↓</b> speed &nbsp;·&nbsp; "
                 "<b>← →</b> paragraph &nbsp;·&nbsp; wheel: scroll by hand<br><b>+ −</b> size &nbsp;·&nbsp; "
-                "<b>Home</b>: back to the start &nbsp;·&nbsp; <b>M</b> mirror &nbsp;·&nbsp; <b>N</b> narrow column, near the lens &nbsp;·&nbsp; "
+                "<b>Home</b>: back to the start &nbsp;·&nbsp; <b>M</b> mirror &nbsp;·&nbsp; <b>N</b> narrow column, near the lens &nbsp;·&nbsp; <b>V</b> follow the voice / timed &nbsp;·&nbsp; "
                 "<b>F</b> full screen &nbsp;·&nbsp; <b>H</b> hide this help",
         "wpm": "words/min", "left": "left", "paused": "paused", "end": "End",
+        "voice": "voice", "listening": "following your voice", "connecting": "connecting…",
+        "lost": "transcription server lost, retrying…", "micerr": "microphone unavailable", "timed": "timed scroll",
         "page": "Page: {page}  ({words} words, about {mins:.1f} min at {wpm} words/min)",
         "text": "Cleaned script: {path}",
         "empty": "Nothing to read in {path}",
@@ -43,13 +66,16 @@ T = {
         "nobrowser": "No Chromium-based browser found. Install Brave, Chromium or Chrome, or set PROMPTER_BROWSER.",
         "opened": "Opened on {conn} {product} ({w}x{h}). Space = play, H = help, Alt+F4 = close.",
         "none": "none detected",
+        "stt": "Local transcription server starting with the window (log: {log}).",
     },
     "fr": {
         "help": "<b>Espace</b> ou clic : lecture / pause &nbsp;·&nbsp; <b>↑ ↓</b> vitesse &nbsp;·&nbsp; "
                 "<b>← →</b> paragraphe &nbsp;·&nbsp; molette : à la main<br><b>+ −</b> taille &nbsp;·&nbsp; "
-                "<b>Début</b> : revenir au début &nbsp;·&nbsp; <b>M</b> miroir &nbsp;·&nbsp; <b>N</b> colonne étroite, près de l'objectif &nbsp;·&nbsp; "
+                "<b>Début</b> : revenir au début &nbsp;·&nbsp; <b>M</b> miroir &nbsp;·&nbsp; <b>N</b> colonne étroite, près de l'objectif &nbsp;·&nbsp; <b>V</b> suivre la voix / défilement fixe &nbsp;·&nbsp; "
                 "<b>F</b> plein écran &nbsp;·&nbsp; <b>H</b> cacher cette aide",
         "wpm": "mots/min", "left": "restant", "paused": "en pause", "end": "Fin",
+        "voice": "voix", "listening": "suit ta voix", "connecting": "connexion…",
+        "lost": "serveur de transcription perdu, nouvelle tentative…", "micerr": "micro indisponible", "timed": "défilement fixe",
         "page": "Page : {page}  ({words} mots, environ {mins:.1f} min à {wpm} mots/min)",
         "text": "Texte nettoyé : {path}",
         "empty": "Rien à lire dans {path}",
@@ -58,6 +84,7 @@ T = {
         "nobrowser": "Aucun navigateur Chromium trouvé. Installer Brave, Chromium ou Chrome, ou définir PROMPTER_BROWSER.",
         "opened": "Ouvert sur {conn} {product} ({w}x{h}). Espace = lecture, H = aide, Alt+F4 = fermer.",
         "none": "aucun détecté",
+        "stt": "Serveur de transcription local lancé avec la fenêtre (journal : {log}).",
     },
 }
 
@@ -177,7 +204,10 @@ body.cursor{cursor:default}
   font-size:var(--size);line-height:1.42;font-weight:600;letter-spacing:.005em;padding-bottom:100vh}
 #text p{margin:0 0 .95em}
 #text .s{display:block;margin-bottom:.18em;transition:color .25s}
-#text .s.past{color:var(--dim)}
+#text .s.past,#text .w.past{color:var(--dim)}
+#mic{position:fixed;left:2vw;top:2.2vh;font:600 20px/1 "Open Sans",sans-serif;color:#8d8880;display:none;align-items:center;gap:.5em}
+#mic i{width:.7em;height:.7em;border-radius:50%;background:#555;display:inline-block}
+#mic.on i{background:#3ecf6e}#mic.wait i{background:var(--accent)}#mic.err i{background:#e5484d}#mic.idle i{background:#555}
 #text .brk{height:1.6em;display:flex;align-items:center;justify-content:center;margin:0 0 .95em;color:#3a3833;font-size:.6em}
 #text .end{color:var(--dim);text-align:center;font-size:.6em;padding-top:1em}
 #mark{position:fixed;left:0;right:0;top:var(--line);height:0;pointer-events:none}
@@ -200,10 +230,10 @@ body.cursor{cursor:default}
 <body>
 <div id="stage"><div id="text">__BODY__<div class="end">__END__</div></div></div>
 <div id="fadeTop"></div><div id="mark"></div><div id="bar"></div>
-<div id="hud"></div><div id="count"></div>
+<div id="hud"></div><div id="count"></div><div id="mic"><i></i><span></span></div>
 <div id="help">__HELP__</div>
 <script>
-const L=__STRINGS__, KEY="prompter:"+__KEYJSON__, WPM0=__WPM__, NARROW0=__NARROW__;
+const L=__STRINGS__, KEY="prompter:"+__KEYJSON__, WPM0=__WPM__, NARROW0=__NARROW__, STT=__STT__, STT_LANG=__STTLANG__;
 const store={get(k,d){try{const v=localStorage.getItem(KEY+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
              set(k,v){try{localStorage.setItem(KEY+k,JSON.stringify(v))}catch(e){}}};
 const text=document.getElementById("text"),hud=document.getElementById("hud"),bar=document.getElementById("bar"),
@@ -224,7 +254,7 @@ function render(){
   bar.style.width=(Math.max(0,Math.min(1,(y-startY())/Math.max(1,maxY()-startY())))*100)+"%";
 }
 function remaining(){const left=Math.max(0,(maxY()-y)/pxPerWord())/wpm;return Math.floor(left)+" min "+String(Math.round(left*60%60)).padStart(2,"0")}
-function showHud(sticky){hud.textContent=`${wpm} ${L.wpm} · ≈ ${remaining()} ${L.left}`+(playing?"":" · "+L.paused);
+function showHud(sticky){hud.textContent=voice?`${L.voice} · ${following?L.listening:L.paused}`:`${wpm} ${L.wpm} · ≈ ${remaining()} ${L.left}`+(playing?"":" · "+L.paused);
   hud.classList.add("on");clearTimeout(hudT);if(!sticky)hudT=setTimeout(()=>hud.classList.remove("on"),1800)}
 function setSize(v){
   const anchor=(y+lineY())/text.scrollHeight;size=Math.max(28,Math.min(140,v));root.setProperty("--size",size+"px");store.set("size",size);
@@ -233,10 +263,12 @@ function setNarrow(on){
   const anchor=(y+lineY())/text.scrollHeight;document.body.classList.toggle("narrow",on);store.set("narrow",on);
   requestAnimationFrame(()=>{y=anchor*text.scrollHeight-lineY();clamp();render();showHud()})}
 function tick(t){
-  if(playing){const dt=Math.min(.1,(t-last)/1000);y+=dt*(wpm/60)*pxPerWord();
+  if(voice){if(following)followStep(Math.min(.1,(t-last)/1000))}
+  else if(playing){const dt=Math.min(.1,(t-last)/1000);y+=dt*(wpm/60)*pxPerWord();
     if(y>=maxY()){y=maxY();playing=false;showHud(true)}clamp();render()}
   last=t;requestAnimationFrame(tick)}
 function toggle(){
+  if(voice){help.classList.add("off");if(!listening){startVoice()}else{following=!following;heard=[];partial="";micState(following?"on":"idle",following?L.listening:L.paused)}showHud(true);return}
   if(counting){clearInterval(counting);counting=null;count.style.display="none";return}
   if(playing){playing=false;showHud(true);return}
   help.classList.add("off");let n=3;count.textContent=n;count.style.display="flex";
@@ -244,7 +276,7 @@ function toggle(){
 function jump(dir){
   const ly=lineY()+y;let target=null;
   if(dir>0){target=paras.find(p=>p.offsetTop>ly+4)}else{const before=paras.filter(p=>p.offsetTop<ly-size*1.2);target=before[before.length-1]||paras[0]}
-  if(target){y=target.offsetTop-lineY()+size*0.1;clamp();render();showHud()}}
+  if(target){y=target.offsetTop-lineY()+size*0.1;clamp();render();resync();showHud()}}
 addEventListener("keydown",e=>{
   const k=e.key;
   if(k===" "||k==="Enter"){e.preventDefault();toggle()}
@@ -254,26 +286,136 @@ addEventListener("keydown",e=>{
   else if(k==="ArrowLeft"||k==="PageUp"){e.preventDefault();jump(-1)}
   else if(k==="+"||k==="="){setSize(size+4)}
   else if(k==="-"||k==="_"){setSize(size-4)}
-  else if(k==="Home"){e.preventDefault();y=startY();render();showHud()}
-  else if(k==="End"){e.preventDefault();y=maxY();render();showHud()}
+  else if(k==="Home"){e.preventDefault();y=startY();render();resync();showHud()}
+  else if(k==="End"){e.preventDefault();y=maxY();render();resync();showHud()}
+  else if((k==="v"||k==="V")&&STT.length){setVoice(!voice)}
   else if(k==="m"||k==="M"){stage.classList.toggle("mirror")}
   else if(k==="n"||k==="N"){setNarrow(!document.body.classList.contains("narrow"))}
   else if(k==="f"||k==="F"){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen().catch(()=>{})}
   else if(k==="h"||k==="H"||k==="?"){help.classList.toggle("off")}
 });
-addEventListener("wheel",e=>{e.preventDefault();y+=e.deltaY*0.6;clamp();render();showHud()},{passive:false});
+addEventListener("wheel",e=>{e.preventDefault();y+=e.deltaY*0.6;clamp();render();resync();showHud()},{passive:false});
 addEventListener("click",()=>toggle());
 let curT=0;addEventListener("mousemove",()=>{document.body.classList.add("cursor");clearTimeout(curT);curT=setTimeout(()=>document.body.classList.remove("cursor"),1500)});
 addEventListener("resize",()=>{clamp();render()});
 function wake(){try{navigator.wakeLock&&navigator.wakeLock.request("screen").catch(()=>{})}catch(e){}}
 wake();document.addEventListener("visibilitychange",()=>{document.visibilityState==="visible"&&wake()});
+// ---- voice follow: the mic goes to a streaming transcription WebSocket, the text follows the words heard
+let voice=false,listening=false,following=false,ws=null,ready=false,ctx=null,micStream=null,retryT=0,sttI=0,tries=0;
+let pos=0,shown=0,heard=[],partial="",partialT=0,lastT=0,rate=2.4,flushed="",posBefore=0;
+const W=[],LAT=0.9;
+const mic=document.getElementById("mic"),micTxt=mic.querySelector("span");
+function norm(s){return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/œ/g,"oe").replace(/[^a-z0-9]+/g,"")}
+for(const s of sents){
+  const f=document.createDocumentFragment();
+  for(const part of s.textContent.split(/(\s+)/)){
+    if(!part)continue;
+    if(/^\s+$/.test(part)){f.appendChild(document.createTextNode(part));continue}
+    const sp=document.createElement("span");sp.className="w";sp.textContent=part;f.appendChild(sp);
+    const n=norm(part);if(n)W.push({el:sp,n});
+  }
+  s.textContent="";s.appendChild(f);
+}
+function lev(a,b){let p=[...Array(b.length+1).keys()];for(let i=1;i<=a.length;i++){const c=[i];
+  for(let j=1;j<=b.length;j++)c[j]=Math.min(p[j]+1,c[j-1]+1,p[j-1]+(a[i-1]===b[j-1]?0:1));p=c}return p[b.length]}
+function same(a,b){if(a===b)return true;if(a.length<4||b.length<4)return false;
+  return 1-lev(a,b)/Math.max(a.length,b.length)>=0.72}
+function where(){try{const h=new URL(STT[sttI]).hostname;return h==="127.0.0.1"||h==="localhost"?"local":h.split(".")[0]}catch(e){return ""}}
+function micState(c,txt){mic.style.display="flex";mic.className=c;micTxt.textContent=txt||""}
+function wordAtLine(){const ly=lineY()+y;let i=W.findIndex(w=>w.el.offsetTop+w.el.offsetHeight>ly);return i<0?W.length:i}
+function resync(){if(!voice)return;pos=shown=wordAtLine();heard=[];partial="";lastT=0;paint()}
+let painted=0;
+function paint(){const n=Math.floor(shown);
+  if(n>painted){for(let i=painted;i<n&&i<W.length;i++)W[i].el.classList.add("past")}
+  else for(let i=n;i<painted&&i<W.length;i++)W[i].el.classList.remove("past");
+  painted=n}
+function match(){
+  const H=heard.slice(-6),last=H[H.length-1];if(!last)return;
+  let best=-1,bestS=0;
+  for(let j=Math.max(0,pos-6);j<=Math.min(W.length-1,pos+40);j++){
+    if(!same(last,W[j].n))continue;
+    let sc=1,k=j-1;
+    for(let h=H.length-2;h>=0&&k>=0;h--){
+      for(let off=0;off<=2&&k-off>=0;off++){if(same(H[h],W[k-off].n)){sc++;k-=off+1;break}}
+    }
+    const d=j-pos,need=d>=-1&&d<=4?1:d>=-1&&d<=14?2:3;
+    if(sc<need)continue;
+    if(sc>bestS||(sc===bestS&&Math.abs(d)<Math.abs(best-pos))){best=j;bestS=sc}
+  }
+  if(best<0)return;
+  const now=performance.now()/1000,adv=best+1-pos;
+  if(adv>0&&lastT&&now-lastT<3)rate=Math.max(1,Math.min(5,rate*0.7+0.3*adv/Math.max(.15,now-lastT)));
+  pos=best+1;lastT=now;if(shown<pos-8||shown>pos+4)shown=pos;
+}
+function hear(w){const n=norm(w);if(!n)return;heard.push(n);if(heard.length>12)heard.shift();match()}
+function onDelta(d){
+  if(!following||!d)return;
+  // deltas are pieces of words: a new word starts with a space. A piece flushed early by the timer is taken back
+  // when the rest of its word arrives, and the position it gave is undone.
+  if(flushed&&!/^\s/.test(d)){heard.pop();pos=posBefore;partial=flushed+partial}
+  flushed="";
+  partial+=d;const parts=partial.split(/\s+/);partial=parts.pop();
+  for(const w of parts)hear(w);partialT=performance.now();
+}
+function followStep(dt){
+  const now=performance.now()/1000;
+  if(partial&&performance.now()-partialT>450){posBefore=pos;flushed=partial;hear(partial);partial=""}
+  const age=lastT?now-lastT:9,ahead=age<1.6?Math.min(3,rate*(age+LAT)):0;
+  const want=Math.min(W.length,pos+ahead);
+  shown+=(want-shown)*Math.min(1,dt*4);
+  const i=Math.min(W.length-1,Math.floor(shown));
+  if(W[i]){const ty=W[i].el.offsetTop-lineY()+size*0.1;y+=(ty-y)*Math.min(1,dt*5);clamp();render();paint()}
+}
+async function startVoice(){
+  if(listening)return;listening=true;following=true;micState("wait",L.connecting);
+  try{
+    micStream=micStream||await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:true,autoGainControl:true}});
+    if(!ctx){
+      ctx=new AudioContext({sampleRate:16000});
+      // ScriptProcessor: an AudioWorklet module cannot be loaded from a file:// page
+      const node=ctx.createScriptProcessor(4096,1,1),sink=ctx.createGain();sink.gain.value=0;
+      ctx.createMediaStreamSource(micStream).connect(node);node.connect(sink);sink.connect(ctx.destination);
+      node.onaudioprocess=e=>{if(!(ws&&ready&&following&&ws.readyState===1))return;
+        const c=e.inputBuffer.getChannelData(0),b=new Int16Array(c.length);
+        for(let k=0;k<c.length;k++){const v=Math.max(-1,Math.min(1,c[k]));b[k]=v<0?v*32768:v*32767}ws.send(b.buffer)};
+      window._promptNode=node;
+    }
+    await ctx.resume();resync();connect();
+  }catch(err){listening=following=false;micState("err",L.micerr+" ("+err.name+")");console.log("prompter mic",err)}
+}
+function connect(){
+  clearTimeout(retryT);ready=false;
+  let opened=false;const url=STT[sttI];
+  const fail=()=>{ws=null;ready=false;if(!listening)return;
+    // the first server (usually the local one) may still be loading its model: give it ~10 s before the next one
+    if(!opened){tries++;if(tries>=(sttI===0?6:2)){sttI=(sttI+1)%STT.length;tries=0}}else{sttI=0;tries=0}
+    micState(opened?"err":"wait",opened?L.lost:L.connecting);retryT=setTimeout(connect,opened?500:1700)};
+  try{ws=new WebSocket(url)}catch(e){fail();return}
+  ws.binaryType="arraybuffer";ws.onopen=()=>{opened=true};
+  ws.onmessage=e=>{if(typeof e.data!=="string")return;let m;try{m=JSON.parse(e.data)}catch(x){return}
+    const t=m.type||"";
+    if(t==="session.created"){ws.send(JSON.stringify({type:"session.update",session:STT_LANG?{sample_rate:16000,language:STT_LANG}:{sample_rate:16000}}));ready=true;
+      tries=0;micState(following?"on":"idle",(following?L.listening:L.paused)+" · "+where())}
+    else if(t.endsWith(".delta"))onDelta(m.delta||"");
+    else if(t==="error")console.log("prompter stt",e.data)};
+  ws.onclose=fail;
+}
+function stopVoice(){listening=following=false;clearTimeout(retryT);if(ws){const w=ws;ws=null;w.close()}
+  if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null}if(ctx){ctx.close();ctx=null}}
+function setVoice(on){
+  voice=on&&STT.length>0;store.set("voice",voice);playing=false;
+  if(voice){micState("idle",L.voice+" · Space");resync()}else{stopVoice();mic.style.display="none";
+    for(const w of W)w.el.classList.remove("past");painted=0}
+  showHud(true)}
 root.setProperty("--size",size+"px");document.body.classList.toggle("narrow",NARROW0||store.get("narrow",false));
-document.fonts.ready.then(()=>{y=startY();render();showHud(true);requestAnimationFrame(tick)});
+document.fonts.ready.then(()=>{y=startY();render();if(STT.length&&store.get("voice",true))setVoice(true);showHud(true);requestAnimationFrame(tick);
+  if(location.hash==="#autovoice"&&voice){startVoice();setInterval(()=>console.log("PROMPTER",(performance.now()/1000).toFixed(1),pos,W[pos-1]&&W[pos-1].n,"|",heard.slice(-4).join(" "),"|",mic.textContent),1000)}});
 </script></body></html>
 """
 
 
-def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, narrow: bool = False) -> str:
+def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, narrow: bool = False,
+               stt: list | None = None, stt_lang: str = "") -> str:
     t = T[lang]
     parts = []
     for b in blocks:
@@ -282,7 +424,7 @@ def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, n
         else:
             parts.append("<p>" + "".join(f'<span class="s">{html.escape(s, quote=False)}</span>'
                                          for s in b["s"]) + "</p>")
-    strings = {k: t[k] for k in ("wpm", "left", "paused")}
+    strings = {k: t[k] for k in ("wpm", "left", "paused", "voice", "listening", "connecting", "lost", "micerr", "timed")}
     return (PAGE.replace("__LANG__", lang)
                 .replace("__TITLE__", html.escape(title))
                 .replace("__HELP__", t["help"])
@@ -291,6 +433,8 @@ def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, n
                 .replace("__KEYJSON__", json.dumps(key))
                 .replace("__WPM__", json.dumps(wpm or 0))
                 .replace("__NARROW__", json.dumps(narrow))
+                .replace("__STT__", json.dumps(stt or []))
+                .replace("__STTLANG__", json.dumps(stt_lang))
                 .replace("__BODY__", "\n".join(parts)))
 
 
@@ -369,12 +513,21 @@ def main():
     ap.add_argument("--screen", help="connector or model of the monitor (default: the external one)")
     ap.add_argument("--wpm", type=int, help="starting speed in words per minute (default: last used, else 150)")
     ap.add_argument("--narrow", action="store_true", help="narrow column (3-4 words a line), reading line near the top, for the camera above the screen")
+    cfg = load_config()
+    ap.add_argument("--stt", default=os.environ.get("PROMPTER_STT", ""),
+                    help="streaming transcription WebSocket(s), comma separated, tried in order (OpenAI realtime "
+                         "style): the text follows your voice, V toggles. Default: \"stt\" in " + str(CONFIG))
+    ap.add_argument("--no-stt", action="store_true", help="timed scroll only, even if a transcription server is set")
+    ap.add_argument("--stt-lang", default=os.environ.get("PROMPTER_STT_LANG", cfg.get("stt_lang", "")),
+                    help="language of the script for the transcription (e.g. fr-FR; default: detected)")
     ap.add_argument("--text", action="store_true", help="also write the cleaned script next to the file")
     ap.add_argument("--no-open", action="store_true", help="only build the page")
     ap.add_argument("--browser", help="browser command (default: Brave, Chromium, Chrome or Edge)")
     ap.add_argument("--lang", choices=sorted(T), default=os.environ.get("PROMPTER_LANG", "en"))
     a = ap.parse_args(argv)
     t = T[a.lang]
+    stt = [] if a.no_stt else ([u.strip() for u in a.stt.split(",") if u.strip()] if a.stt else
+                               ([cfg["stt"]] if isinstance(cfg.get("stt"), str) else list(cfg.get("stt") or [])))
 
     src = Path(a.script).expanduser().resolve()
     blocks = parse(src.read_text(encoding="utf-8"))
@@ -385,7 +538,7 @@ def main():
 
     DATA.mkdir(parents=True, exist_ok=True)
     page = DATA / (re.sub(r"[^\w.-]+", "-", src.stem).strip("-") + ".html")
-    page.write_text(build_html(blocks, src.stem, str(src), a.lang, a.wpm, a.narrow), encoding="utf-8")
+    page.write_text(build_html(blocks, src.stem, str(src), a.lang, a.wpm, a.narrow, stt, a.stt_lang), encoding="utf-8")
     print(t["page"].format(page=page, words=words, mins=words / wpm, wpm=wpm))
     if a.text:
         out = src.with_name(src.stem + ".prompter.txt")
@@ -412,6 +565,19 @@ def main():
     cmd += [f"--user-data-dir={DATA / 'browser-profile'}", "--no-first-run", "--no-default-browser-check",
             "--disable-features=Translate", f"--window-position={mon['x'] + 40},{mon['y'] + 40}",
             "--window-size=1000,700", "--start-fullscreen", f"--app={page.as_uri()}", *extra]
+    server = cfg.get("stt_server")
+    if stt:
+        cmd.insert(1, "--use-fake-ui-for-media-stream")  # dedicated profile: grant the mic without a prompt
+    if stt and server and not port_open(stt[0]):
+        # local transcription server for the session: started with the window, stopped when it closes
+        log = DATA / "stt-server.log"
+        # the browser command returns at once when a prompter window is already open (same profile): the server
+        # then lives until the profile's SingletonLock goes away, i.e. until the last prompter window closes
+        lock = DATA / "browser-profile" / "SingletonLock"
+        cmd = ["sh", "-c", 'log="$1" lock="$2" srv="$3"; shift 3; sh -c "$srv" >"$log" 2>&1 & s=$!; "$@"; '
+               'sleep 3; while [ -L "$lock" ]; do sleep 3; done; kill $s', "prompter-stt", str(log), str(lock),
+               " ".join(shlex.quote(x) for x in server) if isinstance(server, list) else server, *cmd]
+        print(t["stt"].format(log=log))
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     print(t["opened"].format(**mon))
 
