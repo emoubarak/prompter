@@ -44,6 +44,31 @@ def load_config() -> dict:
     return cfg
 
 
+def grant_mic(profile: Path) -> None:
+    """Allow the microphone for local pages in the prompter's own browser profile, so it never asks.
+
+    Written while the browser is closed (it rewrites Preferences on exit); a running prompter already has it."""
+    lock = profile / "SingletonLock"
+    if lock.is_symlink():
+        try:
+            os.kill(int(os.readlink(lock).rsplit("-", 1)[1]), 0)
+            return
+        except (OSError, ValueError, IndexError):
+            pass
+    prefs = profile / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    mic = (data.setdefault("profile", {}).setdefault("content_settings", {})
+               .setdefault("exceptions", {}).setdefault("media_stream_mic", {}))
+    if mic.get("file:///*,*", {}).get("setting") == 1:
+        return
+    mic["file:///*,*"] = {"setting": 1}
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text(json.dumps(data), encoding="utf-8")
+
+
 def port_open(url: str) -> bool:
     import socket
     from urllib.parse import urlparse
@@ -578,7 +603,7 @@ def main():
             "--window-size=1000,700", "--start-fullscreen", f"--app={page.as_uri()}", *extra]
     server = cfg.get("stt_server")
     if stt:
-        cmd.insert(1, "--use-fake-ui-for-media-stream")  # dedicated profile: grant the mic without a prompt
+        grant_mic(DATA / "browser-profile")
     if stt and server and not a.stt and not port_open(stt[0]):
         # local transcription server for the session: started with the window, stopped when it closes
         log = DATA / "stt-server.log"
