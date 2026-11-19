@@ -572,10 +572,11 @@ def main():
         # local transcription server for the session: started with the window, stopped when it closes
         log = DATA / "stt-server.log"
         # the browser command returns at once when a prompter window is already open (same profile): the server
-        # then lives until the profile's SingletonLock goes away, i.e. until the last prompter window closes
+        # then lives while the process named in the profile's SingletonLock is alive (a crash leaves the link behind)
         lock = DATA / "browser-profile" / "SingletonLock"
         cmd = ["sh", "-c", 'log="$1" lock="$2" srv="$3"; shift 3; sh -c "$srv" >"$log" 2>&1 & s=$!; "$@"; '
-               'sleep 3; while [ -L "$lock" ]; do sleep 3; done; kill $s', "prompter-stt", str(log), str(lock),
+               'sleep 3; while t=$(readlink "$lock") && kill -0 "${t##*-}" 2>/dev/null; do sleep 3; done; '
+               'kill $s; sleep 5; kill -9 $s 2>/dev/null', "prompter-stt", str(log), str(lock),
                " ".join(shlex.quote(x) for x in server) if isinstance(server, list) else server, *cmd]
         print(t["stt"].format(log=log))
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
