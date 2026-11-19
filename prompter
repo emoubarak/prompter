@@ -30,7 +30,7 @@ CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "pro
 
 
 def load_config() -> dict:
-    """Optional ~/.config/prompter/config.json: {"stt": [urls], "stt_lang": "fr-FR", "stt_server": [argv]}."""
+    """Optional ~/.config/prompter/config.json: {"screen": "ARZOPA", "stt": [urls], "stt_lang": "fr-FR", "stt_server": [argv]}."""
     try:
         cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -370,9 +370,9 @@ function followStep(dt){
   if(partial&&performance.now()-partialT>450){posBefore=pos;flushed=partial;flushT=performance.now();hear(partial);partial=""}
   const age=lastT?now-lastT:9,ahead=age<1.6?Math.min(3,rate*(age+LAT)):0;
   const want=Math.min(W.length,pos+ahead);
-  shown+=(want-shown)*Math.min(1,dt*4);
+  shown+=(want-shown)*Math.min(1,dt*8);
   const i=Math.min(W.length-1,Math.floor(shown));
-  if(W[i]){const ty=W[i].el.offsetTop-lineY()+size*0.1;y+=(ty-y)*Math.min(1,dt*5);clamp();render();paint()}
+  if(W[i]){const ty=W[i].el.offsetTop-lineY()+size*0.1;y+=(ty-y)*Math.min(1,dt*9);clamp();render();paint()}
 }
 async function startVoice(){
   if(listening)return;listening=true;following=true;micState("wait",L.connecting);
@@ -381,7 +381,7 @@ async function startVoice(){
     if(!ctx){
       ctx=new AudioContext({sampleRate:16000});
       // ScriptProcessor: an AudioWorklet module cannot be loaded from a file:// page
-      const node=ctx.createScriptProcessor(4096,1,1),sink=ctx.createGain();sink.gain.value=0;
+      const node=ctx.createScriptProcessor(2048,1,1),sink=ctx.createGain();sink.gain.value=0;
       ctx.createMediaStreamSource(micStream).connect(node);node.connect(sink);sink.connect(ctx.destination);
       node.onaudioprocess=e=>{if(!(ws&&ready&&following&&ws.readyState===1))return;
         const c=e.inputBuffer.getChannelData(0),b=new Int16Array(c.length);
@@ -562,7 +562,8 @@ def main():
         sys.exit(t["nobrowser"])
     mons = monitors_mutter() or monitors_xrandr()
     names = ", ".join(f"{m['conn']} {m['product']}".strip() for m in mons) or t["none"]
-    mon = pick(mons, a.screen)
+    # a screen named in the config ("screen": "ARZOPA") is preferred when it is plugged in, else the usual choice
+    mon = pick(mons, a.screen) if a.screen else (pick(mons, cfg.get("screen")) or pick(mons, None))
     if not mon:
         if a.screen:
             sys.exit(t["noscreen"].format(want=a.screen, names=names))
