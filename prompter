@@ -4,6 +4,7 @@
   prompter script.md                  clean the script, open it full screen on the external monitor
   prompter script.md --screen DP-1    pick a monitor (connector or model name, e.g. ARZOPA)
   prompter script.md --wpm 140        starting speed in words per minute
+  prompter script.md --narrow        narrow column near the lens (less eye travel)
   prompter script.md --text           also write the cleaned script next to it (script.prompter.txt)
   prompter script.md --no-open        only build the page
   prompter script.md --lang fr        interface language (en, fr)
@@ -11,7 +12,7 @@
 
 Keys: Space or click = play/pause (3 s countdown), Up/Down = speed, Left/Right = previous/next
 paragraph, mouse wheel = scroll by hand, + / - = text size, Home = back to the start, M = mirror,
-F = full screen, H = help. Close with Alt+F4.
+N = narrow column near the lens, F = full screen, H = help. Close with Alt+F4.
 """
 import argparse
 import html
@@ -31,7 +32,7 @@ T = {
     "en": {
         "help": "<b>Space</b> or click: play / pause &nbsp;·&nbsp; <b>↑ ↓</b> speed &nbsp;·&nbsp; "
                 "<b>← →</b> paragraph &nbsp;·&nbsp; wheel: scroll by hand<br><b>+ −</b> size &nbsp;·&nbsp; "
-                "<b>Home</b>: back to the start &nbsp;·&nbsp; <b>M</b> mirror &nbsp;·&nbsp; "
+                "<b>Home</b>: back to the start &nbsp;·&nbsp; <b>M</b> mirror &nbsp;·&nbsp; <b>N</b> narrow column, near the lens &nbsp;·&nbsp; "
                 "<b>F</b> full screen &nbsp;·&nbsp; <b>H</b> hide this help",
         "wpm": "words/min", "left": "left", "paused": "paused", "end": "End",
         "page": "Page: {page}  ({words} words, about {mins:.1f} min at {wpm} words/min)",
@@ -46,7 +47,7 @@ T = {
     "fr": {
         "help": "<b>Espace</b> ou clic : lecture / pause &nbsp;·&nbsp; <b>↑ ↓</b> vitesse &nbsp;·&nbsp; "
                 "<b>← →</b> paragraphe &nbsp;·&nbsp; molette : à la main<br><b>+ −</b> taille &nbsp;·&nbsp; "
-                "<b>Début</b> : revenir au début &nbsp;·&nbsp; <b>M</b> miroir &nbsp;·&nbsp; "
+                "<b>Début</b> : revenir au début &nbsp;·&nbsp; <b>M</b> miroir &nbsp;·&nbsp; <b>N</b> colonne étroite, près de l'objectif &nbsp;·&nbsp; "
                 "<b>F</b> plein écran &nbsp;·&nbsp; <b>H</b> cacher cette aide",
         "wpm": "mots/min", "left": "restant", "paused": "en pause", "end": "Fin",
         "page": "Page : {page}  ({words} mots, environ {mins:.1f} min à {wpm} mots/min)",
@@ -163,7 +164,9 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prompter · __TITLE__</title>
 <style>
-:root{--bg:#000;--fg:#f4f1ea;--dim:#5d5a55;--accent:#ffb020;--size:54px;--width:1500px}
+:root{--bg:#000;--fg:#f4f1ea;--dim:#5d5a55;--accent:#ffb020;--size:54px;--width:1500px;--line:46vh}
+body.narrow{--width:calc(var(--size)*7.5);--line:16vh}
+body.narrow #text{text-align:center}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden}
 body{font-family:"Open Sans","Noto Sans",Cantarell,"Segoe UI",Roboto,sans-serif;cursor:none}
@@ -177,11 +180,11 @@ body.cursor{cursor:default}
 #text .s.past{color:var(--dim)}
 #text .brk{height:1.6em;display:flex;align-items:center;justify-content:center;margin:0 0 .95em;color:#3a3833;font-size:.6em}
 #text .end{color:var(--dim);text-align:center;font-size:.6em;padding-top:1em}
-#mark{position:fixed;left:0;right:0;top:46vh;height:0;pointer-events:none}
+#mark{position:fixed;left:0;right:0;top:var(--line);height:0;pointer-events:none}
 #mark::before,#mark::after{content:"";position:absolute;top:-14px;border:14px solid transparent}
 #mark::before{left:1.2vw;border-left:22px solid var(--accent)}
 #mark::after{right:1.2vw;border-right:22px solid var(--accent)}
-#fadeTop{position:fixed;left:0;right:0;top:0;height:calc(46vh - .6*var(--size));
+#fadeTop{position:fixed;left:0;right:0;top:0;height:calc(var(--line) - .6*var(--size));
   background:linear-gradient(#000 0%,rgba(0,0,0,.55) 70%,rgba(0,0,0,0));pointer-events:none}
 #bar{position:fixed;left:0;bottom:0;height:4px;background:var(--accent);opacity:.55;width:0}
 #hud{position:fixed;right:2vw;top:2.2vh;font:600 22px/1.3 "Open Sans",sans-serif;color:#8d8880;
@@ -200,7 +203,7 @@ body.cursor{cursor:default}
 <div id="hud"></div><div id="count"></div>
 <div id="help">__HELP__</div>
 <script>
-const L=__STRINGS__, KEY="prompter:"+__KEYJSON__, WPM0=__WPM__;
+const L=__STRINGS__, KEY="prompter:"+__KEYJSON__, WPM0=__WPM__, NARROW0=__NARROW__;
 const store={get(k,d){try{const v=localStorage.getItem(KEY+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
              set(k,v){try{localStorage.setItem(KEY+k,JSON.stringify(v))}catch(e){}}};
 const text=document.getElementById("text"),hud=document.getElementById("hud"),bar=document.getElementById("bar"),
@@ -209,7 +212,7 @@ const root=document.documentElement.style;
 let wpm=WPM0||store.get("wpm",150),size=store.get("size",54),y=0,playing=false,last=0,hudT=0,counting=null;
 const sents=[...text.querySelectorAll(".s")],paras=[...text.querySelectorAll("p,.brk")];
 const words=Math.max(1,sents.reduce((n,s)=>n+s.textContent.trim().split(/\s+/).length,0));
-function lineY(){return innerHeight*0.46}
+function lineY(){return innerHeight*(document.body.classList.contains("narrow")?0.16:0.46)}
 function startY(){return -lineY()+size*0.2}
 function maxY(){return text.scrollHeight-innerHeight}
 function pxPerWord(){return (text.scrollHeight-innerHeight)/words}
@@ -225,6 +228,9 @@ function showHud(sticky){hud.textContent=`${wpm} ${L.wpm} · ≈ ${remaining()} 
   hud.classList.add("on");clearTimeout(hudT);if(!sticky)hudT=setTimeout(()=>hud.classList.remove("on"),1800)}
 function setSize(v){
   const anchor=(y+lineY())/text.scrollHeight;size=Math.max(28,Math.min(140,v));root.setProperty("--size",size+"px");store.set("size",size);
+  requestAnimationFrame(()=>{y=anchor*text.scrollHeight-lineY();clamp();render();showHud()})}
+function setNarrow(on){
+  const anchor=(y+lineY())/text.scrollHeight;document.body.classList.toggle("narrow",on);store.set("narrow",on);
   requestAnimationFrame(()=>{y=anchor*text.scrollHeight-lineY();clamp();render();showHud()})}
 function tick(t){
   if(playing){const dt=Math.min(.1,(t-last)/1000);y+=dt*(wpm/60)*pxPerWord();
@@ -251,6 +257,7 @@ addEventListener("keydown",e=>{
   else if(k==="Home"){e.preventDefault();y=startY();render();showHud()}
   else if(k==="End"){e.preventDefault();y=maxY();render();showHud()}
   else if(k==="m"||k==="M"){stage.classList.toggle("mirror")}
+  else if(k==="n"||k==="N"){setNarrow(!document.body.classList.contains("narrow"))}
   else if(k==="f"||k==="F"){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen().catch(()=>{})}
   else if(k==="h"||k==="H"||k==="?"){help.classList.toggle("off")}
 });
@@ -260,13 +267,13 @@ let curT=0;addEventListener("mousemove",()=>{document.body.classList.add("cursor
 addEventListener("resize",()=>{clamp();render()});
 function wake(){try{navigator.wakeLock&&navigator.wakeLock.request("screen").catch(()=>{})}catch(e){}}
 wake();document.addEventListener("visibilitychange",()=>{document.visibilityState==="visible"&&wake()});
-root.setProperty("--size",size+"px");
+root.setProperty("--size",size+"px");document.body.classList.toggle("narrow",NARROW0||store.get("narrow",false));
 document.fonts.ready.then(()=>{y=startY();render();showHud(true);requestAnimationFrame(tick)});
 </script></body></html>
 """
 
 
-def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None) -> str:
+def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, narrow: bool = False) -> str:
     t = T[lang]
     parts = []
     for b in blocks:
@@ -283,6 +290,7 @@ def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None) -
                 .replace("__STRINGS__", json.dumps(strings, ensure_ascii=False))
                 .replace("__KEYJSON__", json.dumps(key))
                 .replace("__WPM__", json.dumps(wpm or 0))
+                .replace("__NARROW__", json.dumps(narrow))
                 .replace("__BODY__", "\n".join(parts)))
 
 
@@ -360,6 +368,7 @@ def main():
     ap.add_argument("script", help="Markdown or plain text file")
     ap.add_argument("--screen", help="connector or model of the monitor (default: the external one)")
     ap.add_argument("--wpm", type=int, help="starting speed in words per minute (default: last used, else 150)")
+    ap.add_argument("--narrow", action="store_true", help="narrow column (3-4 words a line), reading line near the top, for the camera above the screen")
     ap.add_argument("--text", action="store_true", help="also write the cleaned script next to the file")
     ap.add_argument("--no-open", action="store_true", help="only build the page")
     ap.add_argument("--browser", help="browser command (default: Brave, Chromium, Chrome or Edge)")
@@ -376,7 +385,7 @@ def main():
 
     DATA.mkdir(parents=True, exist_ok=True)
     page = DATA / (re.sub(r"[^\w.-]+", "-", src.stem).strip("-") + ".html")
-    page.write_text(build_html(blocks, src.stem, str(src), a.lang, a.wpm), encoding="utf-8")
+    page.write_text(build_html(blocks, src.stem, str(src), a.lang, a.wpm, a.narrow), encoding="utf-8")
     print(t["page"].format(page=page, words=words, mins=words / wpm, wpm=wpm))
     if a.text:
         out = src.with_name(src.stem + ".prompter.txt")

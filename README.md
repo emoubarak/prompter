@@ -38,6 +38,7 @@ window, full screen, on the right monitor.
 | + / − | Text size |
 | Home / End | Start / end of the script |
 | M | Mirror (for a beam-splitter glass) |
+| N | Narrow column: 3 or 4 words a line, reading line near the top, so your eyes barely move |
 | F | Toggle full screen |
 | H | Show or hide the help |
 
@@ -59,6 +60,7 @@ cd prompter
 prompter script.md                  open on the external monitor
 prompter script.md --screen DP-1    pick a monitor (connector or model name)
 prompter script.md --wpm 140        starting speed
+prompter script.md --narrow        narrow column near the lens
 prompter script.md --text           also write the cleaned script to script.prompter.txt
 prompter script.md --no-open        only build the page
 prompter script.md --lang fr        interface in French (or set PROMPTER_LANG=fr)
