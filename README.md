@@ -39,6 +39,7 @@ window, full screen, on the right monitor.
 | Home / End | Start / end of the script |
 | M | Mirror (for a beam-splitter glass) |
 | N | Narrow column: 3 or 4 words a line, reading line near the top, so your eyes barely move |
+| V | Follow the voice / timed scroll (when a transcription server is set) |
 | F | Toggle full screen |
 | H | Show or hide the help |
 
@@ -61,6 +62,8 @@ prompter script.md                  open on the external monitor
 prompter script.md --screen DP-1    pick a monitor (connector or model name)
 prompter script.md --wpm 140        starting speed
 prompter script.md --narrow        narrow column near the lens
+prompter script.md --stt ws://…    follow the voice through a streaming transcription server
+prompter script.md --no-stt        timed scroll only
 prompter script.md --text           also write the cleaned script to script.prompter.txt
 prompter script.md --no-open        only build the page
 prompter script.md --lang fr        interface in French (or set PROMPTER_LANG=fr)
@@ -69,6 +72,31 @@ prompter script.md -- --kiosk       extra flags passed to the browser
 
 `PROMPTER_BROWSER` picks the browser command. The page and the browser profile live in
 `~/.local/share/prompter/`, apart from your usual browser profile.
+
+## Follow the voice
+
+With a streaming transcription server, the text follows what you say instead of a fixed speed: it moves on
+when you speak, waits when you pause or improvise, and keeps the line you are reading on the reading line.
+Space starts and pauses, V switches between voice and timed scroll, ← → and the wheel re-place you after a retake.
+
+The page sends the microphone (16 kHz PCM) to a WebSocket that speaks the OpenAI realtime transcription events
+(`session.update`, then `*.delta` text pieces), such as `nemo-speech serve` from
+[NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp) with a Nemotron streaming model. Each heard word is
+matched against the next words of the script, with room for misheard and skipped words.
+
+Run the server on the machine that records if you can: a busy remote server lags behind, a local one keeps up.
+`~/.config/prompter/config.json` sets it once; servers are tried in order, and `stt_server` starts a local one
+with the window and stops it when the last prompter window closes:
+
+```json
+{
+  "stt": ["ws://127.0.0.1:8097/v1/audio/transcriptions/realtime",
+          "ws://other-machine:8093/v1/audio/transcriptions/realtime"],
+  "stt_lang": "fr-FR",
+  "stt_server": ["nemo-speech", "serve", "--no-ui", "--threads", "4", "--host", "127.0.0.1", "--port", "8097",
+                 "--device", "cpu", "--asr-model", "/path/to/nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"]
+}
+```
 
 ## Writing a script
 
