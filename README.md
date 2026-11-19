@@ -86,10 +86,12 @@ matched against the next words of the script, with room for misheard and skipped
 
 Run the server on the machine that records if you can: a busy remote server lags behind, a local one keeps up.
 `~/.config/prompter/config.json` sets it once; servers are tried in order, and `stt_server` starts a local one
-with the window and stops it when the last prompter window closes:
+with the window and stops it when the last prompter window closes. `screen` names the monitor to prefer when it
+is plugged in. The microphone is allowed once in the prompter's own browser profile, so it never asks:
 
 ```json
 {
+  "screen": "ARZOPA",
   "stt": ["ws://127.0.0.1:8097/v1/audio/transcriptions/realtime",
           "ws://other-machine:8093/v1/audio/transcriptions/realtime"],
   "stt_lang": "fr-FR",
