@@ -14,13 +14,16 @@ window, full screen, on the right monitor.
 
 ## What it does
 
-- **Cleans the script for reading.** Headings, cue lines such as `**[Intro]**` or `[B-roll]`, and the
-  prep notes above the first `---` are removed. Bold, links and code marks are stripped. Each sentence
-  gets its own line, paragraphs are spaced for breathing, and a faint `• • •` marks each new section.
-  The words you read are exactly the words of your script.
+- **Cleans the script for reading.** Headings, cue lines such as `**[Intro]**` or `[B-roll]`, the prep
+  notes above the first `---`, HTML comments (including `<!-- … -->` notes left for yourself) and fenced
+  code blocks are removed. Bold, links and code marks are stripped. Each sentence gets its own line,
+  never split after a title or an initial (`Dr. Smith`, `J. R. R. Tolkien`), and paragraphs are spaced
+  for breathing, with a faint `• • •` marking each new section. The words you read are exactly the words
+  of your script.
 - **Opens on the right screen.** It finds your external monitor (GNOME through Mutter, other X11
   desktops through `xrandr`) and opens a full-screen window there. Pick another one with
-  `--screen DP-2` or by model name, `--screen ARZOPA`.
+  `--screen DP-2`, by model name, `--screen ARZOPA`, or by the start of either (`--screen arz`);
+  `prompter --list-screens` prints what is plugged in.
 - **Scrolls at your speaking pace.** Speed is set in words per minute, not in pixels, so it stays
   right when you change the text size. The time left is shown on demand.
 - **Stays out of the way.** Black background, a reading line marked by two arrows, text already read
@@ -60,7 +63,8 @@ cd prompter
 ```
 prompter script.md                  open on the external monitor
 prompter script.md --screen DP-1    pick a monitor (connector or model name)
-prompter script.md --wpm 140        starting speed
+prompter script.md --wpm 140        starting speed, 20 to 600 words per minute
+prompter script.md --size 64        starting text size, 28 to 140 pixels
 prompter script.md --narrow        narrow column near the lens
 prompter script.md --stt ws://…    follow the voice through a streaming transcription server
 prompter script.md --no-stt        timed scroll only
@@ -68,7 +72,14 @@ prompter script.md --text           also write the cleaned script to script.prom
 prompter script.md --no-open        only build the page
 prompter script.md --lang fr        interface in French (or set PROMPTER_LANG=fr)
 prompter script.md -- --kiosk       extra flags passed to the browser
+prompter --list-screens             print the monitors found, then exit
+prompter --version                  print the version
 ```
+
+A number outside its range is refused with the flag named, rather than silently ignored: a speed of
+`0` would otherwise look like "no speed set" and quietly fall back to 150. A script that cannot be
+read (missing, a directory, not UTF-8) or a transcription server that is not a `ws://`/`wss://` URL
+is reported in one line and exits with status 2, never a traceback.
 
 `PROMPTER_BROWSER` picks the browser command. The page and the browser profile live in
 `~/.local/share/prompter/`, apart from your usual browser profile.
@@ -92,6 +103,10 @@ is plugged in. The microphone is allowed once in the prompter's own browser prof
 ```json
 {
   "screen": "ARZOPA",
+  "wpm": 150,
+  "size": 54,
+  "narrow": false,
+  "lang": "en",
   "stt": ["ws://127.0.0.1:8097/v1/audio/transcriptions/realtime",
           "ws://other-machine:8093/v1/audio/transcriptions/realtime"],
   "stt_lang": "fr-FR",
@@ -100,11 +115,17 @@ is plugged in. The microphone is allowed once in the prompter's own browser prof
 }
 ```
 
+`wpm`, `size`, `narrow` and `lang` are what a new script opens with; a speed or a size you change with
+the arrow keys is still remembered per script and wins over them, and a flag on the command line wins
+over both. A value of the wrong type or outside its range is reported and ignored, so a typo in this
+file never stops a recording.
+
 ## Writing a script
 
 See [examples/sample.md](examples/sample.md). Anything above the first `---` (if it comes in the
 first 15 lines) is treated as notes to yourself. Put a cue on its own line in brackets to mark a
-section for the edit: it is hidden from the prompter and becomes a section break.
+section for the edit: it is hidden from the prompter and becomes a section break. HTML comments,
+fenced code blocks and `[//]: # (…)` comments are notes too, and are never read aloud.
 
 ```markdown
 # Episode 1
