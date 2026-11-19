@@ -32,9 +32,16 @@ CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "pro
 def load_config() -> dict:
     """Optional ~/.config/prompter/config.json: {"stt": [urls], "stt_lang": "fr-FR", "stt_server": [argv]}."""
     try:
-        return json.loads(CONFIG.read_text(encoding="utf-8"))
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
+    except (OSError, ValueError) as e:
+        print(f"prompter: {CONFIG} ignored ({e})", file=sys.stderr)
+        return {}
+    if not isinstance(cfg, dict):
+        print(f"prompter: {CONFIG} ignored (not a JSON object)", file=sys.stderr)
+        return {}
+    return cfg
 
 
 def port_open(url: str) -> bool:
@@ -42,7 +49,7 @@ def port_open(url: str) -> bool:
     from urllib.parse import urlparse
     u = urlparse(url)
     try:
-        with socket.create_connection((u.hostname, u.port or 80), timeout=0.5):
+        with socket.create_connection((u.hostname, u.port or (443 if u.scheme in ("wss", "https") else 80)), timeout=0.5):
             return True
     except OSError:
         return False
@@ -256,19 +263,20 @@ function render(){
 function remaining(){const left=Math.max(0,(maxY()-y)/pxPerWord())/wpm;return Math.floor(left)+" min "+String(Math.round(left*60%60)).padStart(2,"0")}
 function showHud(sticky){hud.textContent=voice?`${L.voice} · ${following?L.listening:L.paused}`:`${wpm} ${L.wpm} · ≈ ${remaining()} ${L.left}`+(playing?"":" · "+L.paused);
   hud.classList.add("on");clearTimeout(hudT);if(!sticky)hudT=setTimeout(()=>hud.classList.remove("on"),1800)}
-function setSize(v){
-  const anchor=(y+lineY())/text.scrollHeight;size=Math.max(28,Math.min(140,v));root.setProperty("--size",size+"px");store.set("size",size);
-  requestAnimationFrame(()=>{y=anchor*text.scrollHeight-lineY();clamp();render();showHud()})}
-function setNarrow(on){
-  const anchor=(y+lineY())/text.scrollHeight;document.body.classList.toggle("narrow",on);store.set("narrow",on);
-  requestAnimationFrame(()=>{y=anchor*text.scrollHeight-lineY();clamp();render();showHud()})}
+// keep the line being read in place across a reflow (size, narrow column): anchor on the sentence at the reading line
+function reflow(change){
+  const ly=lineY()+y,el=sents.find(s=>s.offsetTop+s.offsetHeight>ly)||sents[sents.length-1];
+  const frac=el?Math.max(0,Math.min(1,(ly-el.offsetTop)/Math.max(1,el.offsetHeight))):0;change();
+  requestAnimationFrame(()=>{if(el)y=el.offsetTop+frac*el.offsetHeight-lineY();clamp();render();resync();showHud()})}
+function setSize(v){reflow(()=>{size=Math.max(28,Math.min(140,v));root.setProperty("--size",size+"px");store.set("size",size)})}
+function setNarrow(on){reflow(()=>{document.body.classList.toggle("narrow",on);store.set("narrow",on)})}
 function tick(t){
   if(voice){if(following)followStep(Math.min(.1,(t-last)/1000))}
   else if(playing){const dt=Math.min(.1,(t-last)/1000);y+=dt*(wpm/60)*pxPerWord();
     if(y>=maxY()){y=maxY();playing=false;showHud(true)}clamp();render()}
   last=t;requestAnimationFrame(tick)}
 function toggle(){
-  if(voice){help.classList.add("off");if(!listening){startVoice()}else{following=!following;heard=[];partial="";micState(following?"on":"idle",following?L.listening:L.paused)}showHud(true);return}
+  if(voice){help.classList.add("off");if(!listening){startVoice()}else{following=!following;heard=[];partial="";flushed="";micState(following?"on":"idle",following?L.listening:L.paused)}showHud(true);return}
   if(counting){clearInterval(counting);counting=null;count.style.display="none";return}
   if(playing){playing=false;showHud(true);return}
   help.classList.add("off");let n=3;count.textContent=n;count.style.display="flex";
@@ -302,7 +310,7 @@ function wake(){try{navigator.wakeLock&&navigator.wakeLock.request("screen").cat
 wake();document.addEventListener("visibilitychange",()=>{document.visibilityState==="visible"&&wake()});
 // ---- voice follow: the mic goes to a streaming transcription WebSocket, the text follows the words heard
 let voice=false,listening=false,following=false,ws=null,ready=false,ctx=null,micStream=null,retryT=0,sttI=0,tries=0;
-let pos=0,shown=0,heard=[],partial="",partialT=0,lastT=0,rate=2.4,flushed="",posBefore=0;
+let pos=0,shown=0,heard=[],partial="",partialT=0,lastT=0,rate=2.4,flushed="",posBefore=0,flushT=0;
 const W=[],LAT=0.9;
 const mic=document.getElementById("mic"),micTxt=mic.querySelector("span");
 function norm(s){return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/œ/g,"oe").replace(/[^a-z0-9]+/g,"")}
@@ -323,7 +331,7 @@ function same(a,b){if(a===b)return true;if(a.length<4||b.length<4)return false;
 function where(){try{const h=new URL(STT[sttI]).hostname;return h==="127.0.0.1"||h==="localhost"?"local":h.split(".")[0]}catch(e){return ""}}
 function micState(c,txt){mic.style.display="flex";mic.className=c;micTxt.textContent=txt||""}
 function wordAtLine(){const ly=lineY()+y;let i=W.findIndex(w=>w.el.offsetTop+w.el.offsetHeight>ly);return i<0?W.length:i}
-function resync(){if(!voice)return;pos=shown=wordAtLine();heard=[];partial="";lastT=0;paint()}
+function resync(){if(!voice)return;pos=shown=wordAtLine();heard=[];partial="";flushed="";lastT=0;paint()}
 let painted=0;
 function paint(){const n=Math.floor(shown);
   if(n>painted){for(let i=painted;i<n&&i<W.length;i++)W[i].el.classList.add("past")}
@@ -352,14 +360,14 @@ function onDelta(d){
   if(!following||!d)return;
   // deltas are pieces of words: a new word starts with a space. A piece flushed early by the timer is taken back
   // when the rest of its word arrives, and the position it gave is undone.
-  if(flushed&&!/^\s/.test(d)){heard.pop();pos=posBefore;partial=flushed+partial}
+  if(flushed&&!/^\s/.test(d)&&performance.now()-flushT<1500){heard.pop();pos=posBefore;partial=flushed+partial}
   flushed="";
   partial+=d;const parts=partial.split(/\s+/);partial=parts.pop();
   for(const w of parts)hear(w);partialT=performance.now();
 }
 function followStep(dt){
   const now=performance.now()/1000;
-  if(partial&&performance.now()-partialT>450){posBefore=pos;flushed=partial;hear(partial);partial=""}
+  if(partial&&performance.now()-partialT>450){posBefore=pos;flushed=partial;flushT=performance.now();hear(partial);partial=""}
   const age=lastT?now-lastT:9,ahead=age<1.6?Math.min(3,rate*(age+LAT)):0;
   const want=Math.min(W.length,pos+ahead);
   shown+=(want-shown)*Math.min(1,dt*4);
@@ -385,16 +393,17 @@ async function startVoice(){
 }
 function connect(){
   clearTimeout(retryT);ready=false;
-  let opened=false;const url=STT[sttI];
-  const fail=()=>{ws=null;ready=false;if(!listening)return;
-    // the first server (usually the local one) may still be loading its model: give it ~10 s before the next one
-    if(!opened){tries++;if(tries>=(sttI===0?6:2)){sttI=(sttI+1)%STT.length;tries=0}}else{sttI=0;tries=0}
-    micState(opened?"err":"wait",opened?L.lost:L.connecting);retryT=setTimeout(connect,opened?500:1700)};
-  try{ws=new WebSocket(url)}catch(e){fail();return}
-  ws.binaryType="arraybuffer";ws.onopen=()=>{opened=true};
-  ws.onmessage=e=>{if(typeof e.data!=="string")return;let m;try{m=JSON.parse(e.data)}catch(x){return}
+  let worked=false,sock=null;const url=STT[sttI];
+  const fail=()=>{if(sock&&ws!==sock)return;ws=null;ready=false;if(!listening)return;
+    // a server that never got to session.created counts as a failed try: the first one (usually local) may still be
+    // loading its model, so it gets ~10 s before the next one. After a working session drops, retry the same one.
+    if(!worked){tries++;if(tries>=(sttI===0?6:2)){sttI=(sttI+1)%STT.length;tries=0}}else tries=0;
+    micState(worked?"err":"wait",worked?L.lost:L.connecting);retryT=setTimeout(connect,worked?500:1700)};
+  try{sock=ws=new WebSocket(url)}catch(e){fail();return}
+  ws.binaryType="arraybuffer";
+  ws.onmessage=e=>{if(ws!==sock||typeof e.data!=="string")return;let m;try{m=JSON.parse(e.data)}catch(x){return}
     const t=m.type||"";
-    if(t==="session.created"){ws.send(JSON.stringify({type:"session.update",session:STT_LANG?{sample_rate:16000,language:STT_LANG}:{sample_rate:16000}}));ready=true;
+    if(t==="session.created"){ws.send(JSON.stringify({type:"session.update",session:STT_LANG?{sample_rate:16000,language:STT_LANG}:{sample_rate:16000}}));ready=true;worked=true;
       tries=0;micState(following?"on":"idle",(following?L.listening:L.paused)+" · "+where())}
     else if(t.endsWith(".delta"))onDelta(m.delta||"");
     else if(t==="error")console.log("prompter stt",e.data)};
@@ -404,6 +413,7 @@ function stopVoice(){listening=following=false;clearTimeout(retryT);if(ws){const
   if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null}if(ctx){ctx.close();ctx=null}}
 function setVoice(on){
   voice=on&&STT.length>0;store.set("voice",voice);playing=false;
+  if(counting){clearInterval(counting);counting=null;count.style.display="none"}
   if(voice){micState("idle",L.voice+" · Space");resync()}else{stopVoice();mic.style.display="none";
     for(const w of W)w.el.classList.remove("past");painted=0}
   showHud(true)}
@@ -568,15 +578,15 @@ def main():
     server = cfg.get("stt_server")
     if stt:
         cmd.insert(1, "--use-fake-ui-for-media-stream")  # dedicated profile: grant the mic without a prompt
-    if stt and server and not port_open(stt[0]):
+    if stt and server and not a.stt and not port_open(stt[0]):
         # local transcription server for the session: started with the window, stopped when it closes
         log = DATA / "stt-server.log"
         # the browser command returns at once when a prompter window is already open (same profile): the server
         # then lives while the process named in the profile's SingletonLock is alive (a crash leaves the link behind)
         lock = DATA / "browser-profile" / "SingletonLock"
-        cmd = ["sh", "-c", 'log="$1" lock="$2" srv="$3"; shift 3; sh -c "$srv" >"$log" 2>&1 & s=$!; "$@"; '
+        cmd = ["sh", "-c", 'log="$1" lock="$2" srv="$3"; shift 3; setsid sh -c "$srv" >>"$log" 2>&1 & s=$!; "$@"; '
                'sleep 3; while t=$(readlink "$lock") && kill -0 "${t##*-}" 2>/dev/null; do sleep 3; done; '
-               'kill $s; sleep 5; kill -9 $s 2>/dev/null', "prompter-stt", str(log), str(lock),
+               'kill -- -$s 2>/dev/null; sleep 5; kill -9 -- -$s 2>/dev/null', "prompter-stt", str(log), str(lock),
                " ".join(shlex.quote(x) for x in server) if isinstance(server, list) else server, *cmd]
         print(t["stt"].format(log=log))
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
