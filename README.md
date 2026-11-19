@@ -6,7 +6,7 @@ Turn a Markdown script into a full-screen teleprompter on your second monitor, w
 prompter episode-1.md
 ```
 
-![prompter on a 1920x1080 monitor](docs/screenshot.png)
+![prompter: one command, then the script scrolls full screen at your speaking pace after a 3 second countdown; up arrow speeds it up to 190 words per minute](docs/demo.gif)
 
 Made for recording voice-overs and talking-head videos with a small monitor placed above or below
 the main screen. No app to install, no account: a single Python file that opens a dedicated browser
