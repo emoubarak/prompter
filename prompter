@@ -4,10 +4,12 @@
   prompter script.md                  clean the script, open it full screen on the external monitor
   prompter script.md --screen DP-1    pick a monitor (connector or model name, e.g. ARZOPA)
   prompter script.md --wpm 140        starting speed in words per minute
+  prompter script.md --size 64        starting text size in pixels
   prompter script.md --narrow        narrow column near the lens (less eye travel)
   prompter script.md --text           also write the cleaned script next to it (script.prompter.txt)
   prompter script.md --no-open        only build the page
   prompter script.md --lang fr        interface language (en, fr)
+  prompter --list-screens             print the monitors found, to pick one with --screen
   prompter script.md -- <flags>       extra flags passed to the browser as is
 
 Keys: Space or click = play/pause (3 s countdown), Up/Down = speed, Left/Right = previous/next
@@ -21,12 +23,60 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "prompter"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "prompter" / "config.json"
+VERSION = "1.1.0"
+
+
+class Fail(Exception):
+    """A problem reported to the reader as one line, instead of a traceback."""
+
+
+def warn(msg: str) -> None:
+    print(f"prompter: {msg}", file=sys.stderr)
+
+
+def _int_in_range(name: str, lo: int, hi: int):
+    """argparse type: a whole number in [lo, hi], rejected by name instead of silently clamped."""
+    def conv(raw: str) -> int:
+        try:
+            value = int(raw)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{name} must be an integer, got {raw!r}") from None
+        if not lo <= value <= hi:
+            raise argparse.ArgumentTypeError(f"{name} must be between {lo} and {hi}, got {value}")
+        return value
+    return conv
+
+
+def _cfg_int(cfg: dict, key: str, lo: int, hi: int) -> int | None:
+    """An optional integer from the config file. A wrong value is reported and ignored, never fatal."""
+    value = cfg.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        warn(f"{CONFIG} {key}={value!r} ignored (must be an integer)")
+        return None
+    if not lo <= value <= hi:
+        warn(f"{CONFIG} {key}={value} ignored (must be between {lo} and {hi})")
+        return None
+    return value
+
+
+def _cfg_bool(cfg: dict, key: str, default: bool = False) -> bool:
+    value = cfg.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        warn(f"{CONFIG} {key}={value!r} ignored (must be true or false)")
+        return default
+    return value
 
 
 def load_config() -> dict:
@@ -70,14 +120,26 @@ def grant_mic(profile: Path) -> None:
 
 
 def port_open(url: str) -> bool:
-    import socket
-    from urllib.parse import urlparse
-    u = urlparse(url)
+    """True when something is listening on the URL's host and port. A URL we cannot parse is
+    reported as not open, which only means the bundled server gets started anyway."""
+    u = urlparse(url if "://" in url else "ws://" + url)
     try:
-        with socket.create_connection((u.hostname, u.port or (443 if u.scheme in ("wss", "https") else 80)), timeout=0.5):
+        port = u.port or (443 if u.scheme in ("wss", "https") else 80)
+        with socket.create_connection((u.hostname, port), timeout=0.5):
             return True
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return False
+
+
+def resolve_lang(raw: str) -> str:
+    """An interface language, falling back to en with a warning instead of a KeyError."""
+    lang = (raw or "en").strip().lower()
+    if lang not in T:
+        warn(f"language {lang!r} not supported ({', '.join(sorted(T))}), using en")
+        return "en"
+    return lang
+
+
 BROWSERS = ["brave-browser-stable", "brave-browser", "brave", "chromium", "chromium-browser",
             "google-chrome-stable", "google-chrome", "microsoft-edge-stable", "microsoft-edge"]
 
@@ -133,8 +195,29 @@ def strip_inline(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# Words that end with a period without ending a sentence: a title ("Dr. Smith"), an initial
+# ("J. R. R. Tolkien"), a Latin abbreviation ("e.g. ..."). Splitting after one of them leaves
+# "Dr." alone on a line and dims it before the name it belongs to is read.
+ABBREV = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "cf", "al", "fig", "figs",
+          "no", "nos", "vol", "vols", "ch", "chap", "sec", "pp", "ed", "eds", "approx", "dept",
+          "est", "min", "mins", "max", "e.g", "i.e", "a.m", "p.m", "u.s", "u.k"}
+_WORD_END = re.compile(r"([A-Za-z](?:\.[A-Za-z])*|[A-Za-z]+)$")
+
+
+def _abbrev_before(text: str, dot: int) -> bool:
+    """True when the period at index `dot` closes a title, an initial or a dotted abbreviation."""
+    m = _WORD_END.search(text[:dot])
+    if not m:
+        return False
+    word = m.group(1)
+    return "." in word or len(word) == 1 or word.lower() in ABBREV
+
+
 def split_sentences(p: str) -> list[str]:
-    """Split after . ! ? … followed by a space and a capital, never inside « ... » or "..." quotes."""
+    """Split after . ! ? … (or a closing quote or bracket) followed by a space and a capital.
+
+    Never inside « ... », "..." or after a title or initials (Dr., J. R. R., e.g.).
+    """
     out, cur, depth, dquote, i = [], "", 0, False, 0
     while i < len(p):
         c = p[i]
@@ -149,8 +232,10 @@ def split_sentences(p: str) -> list[str]:
         if depth == 0 and not dquote and i + 1 < len(p) and p[i + 1] == " ":
             if c in ".!?…":
                 end_here = True
-            elif c in "»”\"" and re.search(r"[.!?…]\s*[»”\"]$", cur):
-                end_here = True
+            elif c in "»”\")]'":
+                end_here = bool(re.search(r"[.!?…]\s*[»”\"'\)\]]$", cur))
+            if end_here and c == "." and _abbrev_before(p, i):
+                end_here = False
         if end_here:
             nxt = p[i + 2:i + 3]
             if nxt and (nxt.isupper() or nxt in "«“\"" or nxt.isdigit()):
@@ -165,15 +250,35 @@ def split_sentences(p: str) -> list[str]:
 
 RULE = re.compile(r"\s*(-{3,}|\*{3,}|_{3,})\s*")
 CUE = re.compile(r"(\*\*|__)?\[[^\]]*\](\*\*|__)?:?")
+HEADING = re.compile(r"#{1,6}(?:\s|$)")
+# Notes that are in the file but not meant to be read: HTML comments, fenced code blocks, and the
+# `[//]: # (...)` comment spelling some editors use. Dropping them keeps "the words you read are
+# the words of your script" true for the parts of the file that are the script.
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?(?:^[ \t]*\1[^\n]*\n?|\Z)", re.S | re.M)
+MD_COMMENT = re.compile(r"\[//\]:\s*#?\s*\(.*\)\s*$")
+SETEXT = re.compile(r"={2,}")
 
 
 def parse(md: str) -> list:
     """Return blocks: {"type": "p", "s": [sentences]} or {"type": "break"}.
 
-    Dropped: headings, cue lines like **[Intro]**, and prep notes above a horizontal rule
-    found in the first 15 lines. Headings, cues and rules become a section break.
+    Dropped: headings, cue lines like **[Intro]**, HTML comments, fenced code blocks, and prep notes
+    above a horizontal rule found in the first 15 lines. Headings, cues and rules become a section break.
     """
-    lines = md.replace("\r\n", "\n").split("\n")
+    md = md.replace("\r\n", "\n")
+    md = HTML_COMMENT.sub("", md)
+    md = FENCE.sub("", md)
+    lines = md.split("\n")
+    # a line underlined with === is a heading (setext): dropped like an ATX heading, and a section break
+    kept = []
+    for ln in lines:
+        if SETEXT.fullmatch(ln.strip()) and kept and kept[-1].strip() and not RULE.fullmatch(kept[-1]):
+            kept.pop()
+            kept.append("")
+            continue
+        kept.append(ln)
+    lines = kept
     for idx, ln in enumerate(lines[:15]):
         if RULE.fullmatch(ln):
             lines = lines[idx + 1:]
@@ -192,7 +297,9 @@ def parse(md: str) -> list:
         if not s:
             flush()
             continue
-        if RULE.fullmatch(s) or s.startswith("#") or CUE.fullmatch(s):
+        if MD_COMMENT.fullmatch(s):
+            continue
+        if RULE.fullmatch(s) or HEADING.match(s) or CUE.fullmatch(s):
             flush()
             if blocks and blocks[-1]["type"] != "break":
                 blocks.append({"type": "break"})
@@ -265,13 +372,13 @@ body.cursor{cursor:default}
 <div id="hud"></div><div id="count"></div><div id="mic"><i></i><span></span></div>
 <div id="help">__HELP__</div>
 <script>
-const L=__STRINGS__, KEY="prompter:"+__KEYJSON__, WPM0=__WPM__, NARROW0=__NARROW__, STT=__STT__, STT_LANG=__STTLANG__;
+const L=__STRINGS__, KEY="prompter:"+__KEYJSON__, WPM0=__WPM__, WPMDEF=__WPMDEF__, SIZE0=__SIZE__, SIZEDEF=__SIZEDEF__, NARROW0=__NARROW__, STT=__STT__, STT_LANG=__STTLANG__;
 const store={get(k,d){try{const v=localStorage.getItem(KEY+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
              set(k,v){try{localStorage.setItem(KEY+k,JSON.stringify(v))}catch(e){}}};
 const text=document.getElementById("text"),hud=document.getElementById("hud"),bar=document.getElementById("bar"),
       help=document.getElementById("help"),count=document.getElementById("count"),stage=document.getElementById("stage");
 const root=document.documentElement.style;
-let wpm=WPM0||store.get("wpm",150),size=store.get("size",54),y=0,playing=false,last=0,hudT=0,counting=null;
+let wpm=WPM0||store.get("wpm",WPMDEF),size=SIZE0||store.get("size",SIZEDEF),y=0,playing=false,last=0,hudT=0,counting=null;
 const sents=[...text.querySelectorAll(".s")],paras=[...text.querySelectorAll("p,.brk")];
 const words=Math.max(1,sents.reduce((n,s)=>n+s.textContent.trim().split(/\s+/).length,0));
 function lineY(){return innerHeight*(document.body.classList.contains("narrow")?0.16:0.46)}
@@ -449,8 +556,14 @@ document.fonts.ready.then(()=>{y=startY();render();if(STT.length&&store.get("voi
 """
 
 
+def _js(value) -> str:
+    """JSON for inside <script>: a `</script>` in a value must not close the tag."""
+    return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
+
+
 def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, narrow: bool = False,
-               stt: list | None = None, stt_lang: str = "") -> str:
+               stt: list | None = None, stt_lang: str = "", size: int | None = None,
+               wpm_default: int = 150, size_default: int = 54) -> str:
     t = T[lang]
     parts = []
     for b in blocks:
@@ -464,12 +577,15 @@ def build_html(blocks: list, title: str, key: str, lang: str, wpm: int | None, n
                 .replace("__TITLE__", html.escape(title))
                 .replace("__HELP__", t["help"])
                 .replace("__END__", html.escape(t["end"]))
-                .replace("__STRINGS__", json.dumps(strings, ensure_ascii=False))
-                .replace("__KEYJSON__", json.dumps(key))
-                .replace("__WPM__", json.dumps(wpm or 0))
-                .replace("__NARROW__", json.dumps(narrow))
-                .replace("__STT__", json.dumps(stt or []))
-                .replace("__STTLANG__", json.dumps(stt_lang))
+                .replace("__STRINGS__", _js(strings))
+                .replace("__KEYJSON__", _js(key))
+                .replace("__WPM__", _js(wpm or 0))
+                .replace("__WPMDEF__", _js(wpm_default))
+                .replace("__SIZE__", _js(size or 0))
+                .replace("__SIZEDEF__", _js(size_default))
+                .replace("__NARROW__", _js(narrow))
+                .replace("__STT__", _js(stt or []))
+                .replace("__STTLANG__", _js(stt_lang))
                 .replace("__BODY__", "\n".join(parts)))
 
 
@@ -513,17 +629,39 @@ def monitors_xrandr() -> list[dict]:
 
 
 def is_internal(conn: str) -> bool:
-    return conn.split("-")[0].upper() in ("EDP", "LVDS", "DSI")
+    """Laptop panels, with or without a dash: eDP-1 and eDP1, LVDS1, DSI-1."""
+    m = re.match(r"[A-Za-z]+", conn)
+    return bool(m) and m.group(0).upper() in ("EDP", "LVDS", "DSI")
 
 
 def pick(mons: list[dict], want: str | None) -> dict | None:
-    if want:
-        w = want.lower()
-        return next((m for m in mons if w in (m["conn"].lower(), m["product"].lower())), None)
-    ext = [m for m in mons if not is_internal(m["conn"])]
-    if ext:
-        return next((m for m in ext if not m.get("primary")), ext[0])
+    """Choose a monitor. An external one by default; `want` is a connector (DP-1), a model name
+    (ARZOPA) or the start of either (arz, DP). External monitors are tried first, so asking for
+    "DP" on a laptop plus an external panel picks the panel and not eDP-1."""
+    if not want:
+        ext = [m for m in mons if not is_internal(m["conn"])]
+        if ext:
+            return next((m for m in ext if not m.get("primary")), ext[0])
+        return None
+    w = want.strip().lower()
+    if not w:
+        return pick(mons, None)
+    order = ([m for m in mons if not is_internal(m["conn"])]
+             + [m for m in mons if is_internal(m["conn"])])
+    tests = (lambda m: m["conn"].lower() == w,
+             lambda m: (m.get("product") or "").lower() == w,
+             lambda m: m["conn"].lower().startswith(w),
+             lambda m: (m.get("product") or "").lower().startswith(w),
+             lambda m: w in m["conn"].lower() or w in (m.get("product") or "").lower())
+    for test in tests:
+        hit = next((m for m in order if test(m)), None)
+        if hit:
+            return hit
     return None
+
+
+def describe_monitors(mons: list[dict]) -> str:
+    return ", ".join(f"{m['conn']} {m['product']}".strip() for m in mons)
 
 
 def find_browser(explicit: str | None) -> str | None:
@@ -535,63 +673,123 @@ def find_browser(explicit: str | None) -> str | None:
 
 # ---------------------------------------------------------------- main
 
-def main():
-    argv = sys.argv[1:]
-    extra = []
-    if "--" in argv:
-        i = argv.index("--")
-        argv, extra = argv[:i], argv[i + 1:]
-    ap = argparse.ArgumentParser(prog="prompter", description=__doc__.split("\n")[0],
-                                 formatter_class=argparse.RawDescriptionHelpFormatter,
-                                 epilog="\n".join(__doc__.split("\n")[2:]))
-    ap.add_argument("script", help="Markdown or plain text file")
-    ap.add_argument("--screen", help="connector or model of the monitor (default: the external one)")
-    ap.add_argument("--wpm", type=int, help="starting speed in words per minute (default: last used, else 150)")
-    ap.add_argument("--narrow", action="store_true", help="narrow column (3-4 words a line), reading line near the top, for the camera above the screen")
-    cfg = load_config()
-    ap.add_argument("--stt", default=os.environ.get("PROMPTER_STT", ""),
-                    help="streaming transcription WebSocket(s), comma separated, tried in order (OpenAI realtime "
-                         "style): the text follows your voice, V toggles. Default: \"stt\" in " + str(CONFIG))
-    ap.add_argument("--no-stt", action="store_true", help="timed scroll only, even if a transcription server is set")
-    ap.add_argument("--stt-lang", default=os.environ.get("PROMPTER_STT_LANG", cfg.get("stt_lang", "")),
-                    help="language of the script for the transcription (e.g. fr-FR; default: detected)")
-    ap.add_argument("--text", action="store_true", help="also write the cleaned script next to the file")
-    ap.add_argument("--no-open", action="store_true", help="only build the page")
-    ap.add_argument("--browser", help="browser command (default: Brave, Chromium, Chrome or Edge)")
-    ap.add_argument("--lang", choices=sorted(T), default=os.environ.get("PROMPTER_LANG", "en"))
-    a = ap.parse_args(argv)
+def read_script(arg: str) -> tuple[Path, str]:
+    """The script path and its text, with one clear line instead of a traceback when it cannot be read."""
+    src = Path(arg).expanduser()
+    try:
+        src = src.resolve()
+    except OSError:
+        src = src.absolute()
+    try:
+        return src, src.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise Fail(f"no such file: {src}") from None
+    except IsADirectoryError:
+        raise Fail(f"is a directory: {src}") from None
+    except UnicodeDecodeError:
+        raise Fail(f"{src} is not UTF-8 text (save the script as UTF-8)") from None
+    except OSError as e:
+        raise Fail(f"cannot read {src}: {e.strerror or e}") from None
+
+
+def write_text(path: Path, text: str) -> None:
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        raise Fail(f"cannot write {path}: {e.strerror or e}") from None
+
+
+def stt_servers(raw: str, cfg: dict, no_stt: bool) -> list[str]:
+    """The transcription WebSockets to try. Each one is checked to be a ws:// or wss:// URL: the page
+    builds a WebSocket from it, and a URL the constructor rejects retries forever without saying why.
+    A URL given on the command line is an error; a bad one in the config file is reported and skipped."""
+    if no_stt:
+        return []
+    configured = cfg.get("stt")
+    if raw:
+        items, strict = [u.strip() for u in raw.split(",")], True
+    elif isinstance(configured, str):
+        items, strict = [configured.strip()], False
+    elif isinstance(configured, list):
+        items, strict = configured, False
+    elif configured is None:
+        return []
+    else:
+        raise Fail(f'{CONFIG} "stt" must be a URL or a list of URLs')
+    kept = []
+    for url in items:
+        if not isinstance(url, str) or not url.strip():
+            if not strict and not isinstance(url, str):
+                warn(f"{CONFIG} stt entry {url!r} ignored (must be a string URL)")
+            continue
+        url = url.strip()
+        parts = urlparse(url)
+        if parts.scheme in ("ws", "wss") and parts.hostname:
+            kept.append(url)
+        elif strict:
+            raise Fail(f"transcription server {url!r} is not a ws:// or wss:// URL")
+        else:
+            warn(f"{CONFIG} stt entry {url!r} ignored (not a ws:// or wss:// URL)")
+    return kept
+
+
+def print_screens() -> int:
+    """List the monitors, so --screen can name one by connector or model."""
+    mons = monitors_mutter() or monitors_xrandr()
+    if not mons:
+        print("No monitors detected (GNOME/Mutter and xrandr both unavailable).")
+        return 0
+    width = max(len(m["conn"]) for m in mons)
+    for m in mons:
+        size = f"{m.get('w', 0)}x{m.get('h', 0)}" if m.get("w") else "?"
+        kind = "internal" if is_internal(m["conn"]) else "external"
+        flags = " primary" if m.get("primary") else ""
+        print(f"{m['conn']:{width}s}  {(m.get('product') or '-'):12s} {size:>10s}  "
+              f"at {m.get('x', 0)},{m.get('y', 0)}  {kind}{flags}")
+    return 0
+
+
+def run(a: argparse.Namespace, cfg: dict, extra: list[str]) -> int:
     t = T[a.lang]
-    stt = [] if a.no_stt else ([u.strip() for u in a.stt.split(",") if u.strip()] if a.stt else
-                               ([cfg["stt"]] if isinstance(cfg.get("stt"), str) else list(cfg.get("stt") or [])))
+    cfg_wpm = _cfg_int(cfg, "wpm", 20, 600)
+    cfg_size = _cfg_int(cfg, "size", 28, 140)
+    narrow = a.narrow or _cfg_bool(cfg, "narrow")
+    wpm = a.wpm or cfg_wpm or 150
+    size = a.size or cfg_size or 54
+    stt = stt_servers(a.stt, cfg, a.no_stt)
 
-    src = Path(a.script).expanduser().resolve()
-    blocks = parse(src.read_text(encoding="utf-8"))
+    src, text = read_script(a.script)
+    blocks = parse(text)
     if not blocks:
-        sys.exit(t["empty"].format(path=src))
+        raise Fail(t["empty"].format(path=src))
     words = count_words(blocks)
-    wpm = a.wpm or 150
 
-    DATA.mkdir(parents=True, exist_ok=True)
-    page = DATA / (re.sub(r"[^\w.-]+", "-", src.stem).strip("-") + ".html")
-    page.write_text(build_html(blocks, src.stem, str(src), a.lang, a.wpm, a.narrow, stt, a.stt_lang), encoding="utf-8")
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise Fail(f"cannot create {DATA}: {e.strerror or e}") from None
+    stem = re.sub(r"[^\w.-]+", "-", src.stem).strip("-.") or "script"
+    page = DATA / (stem + ".html")
+    write_text(page, build_html(blocks, src.stem, str(src), a.lang, a.wpm, narrow, stt, a.stt_lang,
+                                a.size, cfg_wpm or 150, cfg_size or 54))
     print(t["page"].format(page=page, words=words, mins=words / wpm, wpm=wpm))
     if a.text:
         out = src.with_name(src.stem + ".prompter.txt")
-        out.write_text(as_text(blocks), encoding="utf-8")
+        write_text(out, as_text(blocks))
         print(t["text"].format(path=out))
     if a.no_open:
-        return
+        return 0
 
     browser = find_browser(a.browser)
     if not browser:
-        sys.exit(t["nobrowser"])
+        raise Fail(t["nobrowser"])
     mons = monitors_mutter() or monitors_xrandr()
-    names = ", ".join(f"{m['conn']} {m['product']}".strip() for m in mons) or t["none"]
+    names = describe_monitors(mons) or t["none"]
     # a screen named in the config ("screen": "ARZOPA") is preferred when it is plugged in, else the usual choice
     mon = pick(mons, a.screen) if a.screen else (pick(mons, cfg.get("screen")) or pick(mons, None))
     if not mon:
         if a.screen:
-            sys.exit(t["noscreen"].format(want=a.screen, names=names))
+            raise Fail(t["noscreen"].format(want=a.screen, names=names))
         print(t["noext"].format(names=names))
         mon = next((m for m in mons if m.get("primary")), mons[0] if mons else
                    {"x": 0, "y": 0, "w": 0, "h": 0, "conn": "", "product": ""})
@@ -617,7 +815,51 @@ def main():
         print(t["stt"].format(log=log))
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     print(t["opened"].format(**mon))
+    return 0
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    extra: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, extra = argv[:i], argv[i + 1:]
+    cfg = load_config()
+    ap = argparse.ArgumentParser(prog="prompter", description=__doc__.split("\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog="\n".join(__doc__.split("\n")[2:]))
+    ap.add_argument("script", nargs="?", help="Markdown or plain text file")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    ap.add_argument("--list-screens", action="store_true",
+                    help="print the monitors found (connector, model, size) and exit")
+    ap.add_argument("--screen", help="connector or model of the monitor (default: the external one)")
+    ap.add_argument("--wpm", type=_int_in_range("--wpm", 20, 600),
+                    help="starting speed in words per minute, 20-600 (default: last used, else 150)")
+    ap.add_argument("--size", type=_int_in_range("--size", 28, 140),
+                    help="starting text size in pixels, 28-140 (default: last used, else 54)")
+    ap.add_argument("--narrow", action="store_true", help="narrow column (3-4 words a line), reading line near the top, for the camera above the screen")
+    ap.add_argument("--stt", default=os.environ.get("PROMPTER_STT", ""),
+                    help="streaming transcription WebSocket(s), comma separated, tried in order (OpenAI realtime "
+                         "style): the text follows your voice, V toggles. Default: \"stt\" in " + str(CONFIG))
+    ap.add_argument("--no-stt", action="store_true", help="timed scroll only, even if a transcription server is set")
+    ap.add_argument("--stt-lang", default=os.environ.get("PROMPTER_STT_LANG", str(cfg.get("stt_lang") or "")),
+                    help="language of the script for the transcription (e.g. fr-FR; default: detected)")
+    ap.add_argument("--text", action="store_true", help="also write the cleaned script next to the file")
+    ap.add_argument("--no-open", action="store_true", help="only build the page")
+    ap.add_argument("--browser", help="browser command (default: Brave, Chromium, Chrome or Edge)")
+    ap.add_argument("--lang", choices=sorted(T),
+                    default=resolve_lang(os.environ.get("PROMPTER_LANG") or str(cfg.get("lang") or "") or "en"))
+    a = ap.parse_args(argv)
+    if a.list_screens:
+        return print_screens()
+    if not a.script:
+        ap.error("a script is required: prompter script.md")
+    try:
+        return run(a, cfg, extra)
+    except Fail as e:
+        warn(str(e))
+        return 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
