@@ -346,12 +346,12 @@ function norm(s){return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").
 const LINK=new Set(["and","or","but","so","because","if","when","that","which","who","with","from","for","before","after",
   "while","until","than","that's","what","where","how","et","ou","mais","donc","car","si","quand","que","qui","pour","avec","sans","dans","avant","après","parce"]);
 // a group of 10 characters or more breaks before a word that opens a new chunk (article, pronoun, preposition);
-// 22 characters or 6 words at most. In the narrow column each group is one line.
-const START=new Set(["a","an","the","my","your","our","their","i","you","we","they","it","to","at","in","on","of","by","le","la","les","un","une","des","du","de","mon","ma","mes","ton","ta","tes","votre","vos","je","tu","il","elle","on","nous","vous","ils","elles","i'll","i'm","i'd","you're","you'll","we're","we'll","it's","à","au","aux","en","sur","par"]);
+// 26 characters or 7 words at most. Object pronouns (you, it, nous, vous) never open a group: « help you get it live ». In the narrow column each group is one line.
+const START=new Set(["a","an","the","my","your","our","their","i","we","they","to","at","in","on","of","by","le","la","les","un","une","des","du","de","mon","ma","mes","ton","ta","tes","votre","vos","je","tu","il","elle","on","ils","elles","i'll","i'm","i'd","you're","you'll","we're","we'll","it's","à","au","aux","en","sur","par"]);
 const len=g=>g.join(" ").length;
 function groups(ws){const out=[];let g=[];
   ws.forEach((w,i)=>{g.push(w);const left=ws.length-i-1,next=(ws[i+1]||"").toLowerCase().replace(/[^\p{L}']/gu,"");
-    if(left&&(/[,;:.!?…»)]$/.test(w)||(g.length>=2&&LINK.has(next)&&left>1)||(len(g)>=10&&START.has(next)&&left>1)||len(g)>=22||g.length>=6)){out.push(g);g=[]}});
+    if(left&&(/[,;:.!?…»)]$/.test(w)||(g.length>=2&&LINK.has(next)&&left>1)||(len(g)>=10&&START.has(next)&&left>1)||len(g)>=26||g.length>=7)){out.push(g);g=[]}});
   if(g.length)out.push(g);return out}
 for(const s of sents){
   const f=document.createDocumentFragment(),gs=groups(s.textContent.trim().split(/\s+/).filter(Boolean));
