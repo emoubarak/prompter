@@ -226,6 +226,8 @@ PAGE = r"""<!doctype html>
 :root{--bg:#000;--fg:#f4f1ea;--dim:#5d5a55;--accent:#ffb020;--size:54px;--width:1500px;--line:46vh}
 body.narrow{--width:calc(var(--size)*7.5);--line:16vh}
 body.narrow #text{text-align:center}
+body.narrow #text{width:max-content;max-width:96vw}
+body.narrow #text .g{display:block;white-space:nowrap}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);overflow:hidden}
 body{font-family:"Open Sans","Noto Sans",Cantarell,"Segoe UI",Roboto,sans-serif;cursor:none}
@@ -339,14 +341,25 @@ let pos=0,shown=0,heard=[],partial="",partialT=0,lastT=0,rate=2.4,flushed="",pos
 const W=[],LAT=0.9;
 const mic=document.getElementById("mic"),micTxt=mic.querySelector("span");
 function norm(s){return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/œ/g,"oe").replace(/[^a-z0-9]+/g,"")}
+// Sense groups: a line only breaks between groups (after punctuation, before a linking word, or every 4 words),
+// never inside a group such as "a project / that's stuck". The narrow column keeps each group whole (nowrap).
+const LINK=new Set(["and","or","but","so","because","if","when","that","which","who","with","from","for","before","after",
+  "while","until","than","that's","what","where","how","et","ou","mais","donc","car","si","quand","que","qui","pour","avec","sans","dans","avant","après","parce"]);
+// a group of 10 characters or more breaks before a word that opens a new chunk (article, pronoun, preposition);
+// 22 characters or 6 words at most. In the narrow column each group is one line.
+const START=new Set(["a","an","the","my","your","our","their","i","you","we","they","it","to","at","in","on","of","by","le","la","les","un","une","des","du","de","mon","ma","mes","ton","ta","tes","votre","vos","je","tu","il","elle","on","nous","vous","ils","elles","i'll","i'm","i'd","you're","you'll","we're","we'll","it's","à","au","aux","en","sur","par"]);
+const len=g=>g.join(" ").length;
+function groups(ws){const out=[];let g=[];
+  ws.forEach((w,i)=>{g.push(w);const left=ws.length-i-1,next=(ws[i+1]||"").toLowerCase().replace(/[^\p{L}']/gu,"");
+    if(left&&(/[,;:.!?…»)]$/.test(w)||(g.length>=2&&LINK.has(next)&&left>1)||(len(g)>=10&&START.has(next)&&left>1)||len(g)>=22||g.length>=6)){out.push(g);g=[]}});
+  if(g.length)out.push(g);return out}
 for(const s of sents){
-  const f=document.createDocumentFragment();
-  for(const part of s.textContent.split(/(\s+)/)){
-    if(!part)continue;
-    if(/^\s+$/.test(part)){f.appendChild(document.createTextNode(part));continue}
-    const sp=document.createElement("span");sp.className="w";sp.textContent=part;f.appendChild(sp);
-    const n=norm(part);if(n)W.push({el:sp,n});
-  }
+  const f=document.createDocumentFragment(),gs=groups(s.textContent.trim().split(/\s+/).filter(Boolean));
+  gs.forEach((g,gi)=>{const gr=document.createElement("span");gr.className="g";
+    g.forEach((part,i)=>{if(i)gr.appendChild(document.createTextNode(" "));
+      const sp=document.createElement("span");sp.className="w";sp.textContent=part;gr.appendChild(sp);
+      const n=norm(part);if(n)W.push({el:sp,n})});
+    f.appendChild(gr);if(gi<gs.length-1)f.appendChild(document.createTextNode(" "))});
   s.textContent="";s.appendChild(f);
 }
 function lev(a,b){let p=[...Array(b.length+1).keys()];for(let i=1;i<=a.length;i++){const c=[i];
